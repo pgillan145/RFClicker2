@@ -1,21 +1,23 @@
 
 // settings
-#define CEREAL
+#undef CEREAL
 
 // buttons
-#define RIGHT           2
-#define DOWN            3
-#define POWER           4
-#define MENURIGHT       5
-#define LEFT            6
-#define BTMENU          7
-#define UP              8  
-#define MENULEFT        9
-
+#define BTMENU          2 // white
+#define POWER           3 // black
+#define MENURIGHT       4 // orange/yellow
+#define RIGHT           5 // red
+#define DOWN            6 // green
+#define LEFT            7 // blue
+#define MENULEFT        8 // brown/black
+#define UP              9 // yellow
 
 #define HOLD_TIMEOUT    300   // how long a button needs to be held down before it triggers an input and resets
 #define BOUNCE_TIMEOUT  35   // the minimum time a button needs to be held down to count as a click
 #define SEND_BLINK_TIME 100  // how long the connection light brightness should jump when data is "sent".
+#define MODES           2
+#define BUTTONS         10
+
 
 // oled
 #define SCREEN_WIDTH    128 // OLED display width, in pixels
@@ -26,22 +28,22 @@
 #define BMP_WIDTH       16
 #define OLED_CHAR_SIZE  8
 
+#define BLUETOOTH
+#include <PGardLib.h>
+#include <RFClickerLib.h>
+#include "oled.h"
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-#include <RFClickerLib.h>
 #include <ArduinoBLE.h>
+#include <Scheduler.h>
 
-#define MODES           2
-#define BUTTONS        10
-BLEService buttonService("1101");
-BLECharacteristic buttonChar("2101", BLERead | BLENotify, HISTORY_LENGTH*2);
-//char button_history[HISTORY_LENGTH*2];
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
+volatile uint32_t now = millis();
+volatile uint32_t last_clicked[BUTTONS];
+volatile uint32_t last_released[BUTTONS];
 void setup() {
-  Serial.begin(9600);
-  delay(2000);
-  Serial.println("setup()");
+  PGardLibSetup();
   //arrayFill(0, button_history, HISTORY_LENGTH*2);
   pinMode(RIGHT, INPUT_PULLUP);
   pinMode(DOWN, INPUT_PULLUP);
@@ -61,172 +63,203 @@ void setup() {
   digitalWrite(BTMENU, HIGH);
   
   if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println(F("SSD1306 allocation failed"));
+    SPL(F("SSD1306 allocation failed"));
     for(;;); // Don't proceed, loop forever
   }
   display.setRotation(2);
+  
 
   if (!BLE.begin()) {
-    Serial.println("starting BLE failed!");
+    SPL("starting BLE failed!");
     while (1);
   }
-  BLE.scanForUuid("1101");
+  //BLE.setTimeout(1);
+  BLE.scanForUuid(BUTTONSVC_UUID);
+  
+  arrayFill(0, last_clicked, BUTTONS);
+  arrayFill(1, last_released, BUTTONS);
+  Scheduler.startLoop(clickLoop);
+  //Scheduler.startLoop(blueLoop);
 }
 
-int mode = 0;
-byte button_status = 0;
-byte last_button_status = 0;
-uint8_t count = 0;
-int32_t right_millis = 0;
-bool right_held = false;
-int32_t down_millis = 0;
-bool down_held = false;
-int32_t left_millis = 0;
-bool left_held = false;
-int32_t up_millis = 0;
-bool up_held = false;
 bool connected = false;
-bool menu = false;
-uint32_t now = 0;
-uint32_t last_send = 0;
-uint32_t last_btmenu = 0;
 String device_name = "";
-uint32_t last_clicked[BUTTONS];
-BLEDevice peripheral;
+int mode = 0;
+BLEDevice peripherals[8];
+
+
+//BLEDevice peripheral;
 
 void loop() {
   now = millis();
+  BLEDevice peripheral = BLE.available();
   switch(mode) {
-    case 0:
-      peripheral = BLE.available();
+    case 0:      
       if (peripheral) {
         BLE.stopScan();
+        SP("got a peripheral:");
+        SPL(peripheral.localName());
         controller(peripheral);
-        BLE.scanForUuid("1101");
+        BLE.scanForUuid(BUTTONSVC_UUID);
+      }
+      else {
+        if (clicked(BTMENU)) {
+          BLE.stopScan();
+          SPL("switching to local mode");
+          mode = 1;
+        }
       }
       break;
     case 1:
-      if (clicked(MENURIGHT)) {
-        mode++;
+      if (peripheral) {
+        arrayUnshift(peripheral, peripherals, 8);
       }
-      if (clicked(MENULEFT)) {
-        mode--;
-      }
-      if (mode >= MODES) {
+      if (clicked(BTMENU)) {
+        SPL("switching to controller mode");
+        BLE.scanForUuid(BUTTONSVC_UUID);
         mode = 0;
       }
-      else if (mode < 0) {
-        mode = MODES - 1;
+      else {
+        for (int i = 0; i< 4; i++) {
+          if (peripherals[i]) {
+            oled_menu[i] = peripherals[i].deviceName();
+          }
+          else {
+            oled_menu[i] = "";
+          }
+        }
+        // hardware tests
+        if (clicked(RIGHT)) { oledStatus("button1", SEND_BLINK_TIME); }
+        if (clicked(DOWN)) { oledStatus("button2", SEND_BLINK_TIME); }
+        if (clicked(LEFT)) { oledStatus("button3", SEND_BLINK_TIME); }
+        if (clicked(UP)) { oledStatus("button4", SEND_BLINK_TIME); }
+        if (clicked(MENULEFT)) { oledStatus("button6", SEND_BLINK_TIME); }
+        if (clicked(MENURIGHT)) { oledStatus("button5", SEND_BLINK_TIME); }
+        if (clicked(POWER)) { oledStatus("power", SEND_BLINK_TIME); }
       }
       break;
   } // switch(mode)
-  OledStatus();
+  oledStatus();
+}
+
+void blueLoop() {
+  BLEDevice peripheral = BLE.available();
+  if (mode == 0) {
+    peripheral = BLE.available();
+  }
+  yield();
 }
 
 void controller(BLEDevice peripheral) {
   // connect to the peripheral
-  Serial.println("Connecting ...");
+  SP("Connecting to ");
+  SP(peripheral.localName());
+  SP("...");
   if (peripheral.connect()) {
-    Serial.print("Connected to ");
-    Serial.println(peripheral.deviceName());
+    SPL("connected");
   } else {
-    Serial.println("Failed to connect!");
+    SPL("failed");
     return;
   }
 
   // discover peripheral attributes
-  Serial.println("Discovering service 0x1101 ...");
-  if (peripheral.discoverService("1101")) {
-    Serial.println("Service discovered");
+  SPL("Discovering service...");
+  if (peripheral.discoverService(BUTTONSVC_UUID)) {
+    SPL("discovered");
   } else {
-    Serial.println("Attribute discovery failed.");
+    SPL("failed");
     peripheral.disconnect();
-
     // Why?
     // while (1);
     return;
   }
 
   // retrieve the simple key characteristic
-  BLECharacteristic buttonChar = peripheral.characteristic("2101");
-
-  // subscribe to the simple key characteristic
-  Serial.println("Subscribing to button characteristic ...");
+  BLECharacteristic buttonChar = peripheral.characteristic(BUTTONCHAR_UUID);
+  
   if (!buttonChar) {
-    Serial.println("no button characteristic found!");
+    SPL("no button characteristic found!");
     peripheral.disconnect();
     return;
-  } else if (!buttonChar.canSubscribe()) {
-    Serial.println("button characteristic is not subscribable!");
-    peripheral.disconnect();
-    return;
-  } else if (!buttonChar.subscribe()) {
-    Serial.println("subscription failed!");
-    peripheral.disconnect();
-    return;
-  } else {
-    Serial.println("Subscribed");
   }
-  //count = 0;
-  //arrayFill(0, button_history, HISTORY_LENGTH*2);
-  //buttonChar.writeValue(button_history, HISTORY_LENGTH*2, true);
+  /* 
+   *  since we're only writing to these -- not reading -- do we need to subscribe?
+  SPL("subscribing...");
+  if (!buttonChar.canSubscribe()) {
+    SPL("not subscribeable");
+    peripheral.disconnect();
+    return;
+  } 
+  else if (!buttonChar.subscribe()) {
+    SPL("failed");
+    peripheral.disconnect();
+    return;
+  } 
+  else {
+    SPL("subscribed");
+  }
+  */
+  
+  BLECharacteristic menuChar = peripheral.characteristic(MENUCHAR_UUID);
+  if (menuChar && menuChar.canRead() && menuChar.canSubscribe()) {
+    updateOledMenu(BLE.central(), menuChar);
+    SP("subscribing to menu...");
+    if (menuChar.subscribe()) {
+      SPL("subscribed");
+      menuChar.setEventHandler(BLEWritten, updateOledMenu);
+    }
+  }
   
   connected = true;
-  device_name = peripheral.deviceName();
-  OledStatus("CONNECTED");
+  device_name = peripheral.localName();
+  oledStatus("CONNECTED");
+  byte button_status = 0;
+  byte last_button_status = 0;
 
   while (peripheral.connected()) {
     now = millis();
     if (clicked(RIGHT)) {
-        OledStatus("button1", SEND_BLINK_TIME);
+        oledStatus("button1", SEND_BLINK_TIME);
         ADDBUTTON(button_status, BUTTON1);
     }
     else {
       CLRBUTTON(button_status, BUTTON1);
     }
-    if (clicked(DOWN)) {
-        OledStatus("button2", SEND_BLINK_TIME);
+    if (clicked(DOWN) > 0) {
+        oledStatus("button2", SEND_BLINK_TIME);
         ADDBUTTON(button_status, BUTTON2);
     }
     else {
       CLRBUTTON(button_status, BUTTON2);
     }
 
-    if (clicked(LEFT)) {
-        OledStatus("button3", SEND_BLINK_TIME);
+    if (clicked(LEFT) > 0) {
+        oledStatus("button3", SEND_BLINK_TIME);
         ADDBUTTON(button_status, BUTTON3);
     }
     else {
       CLRBUTTON(button_status, BUTTON3);
     }
-    
-    if (clicked(MENULEFT)) {
-        OledStatus("button5", SEND_BLINK_TIME);
+    if (clicked(UP)) {
+        oledStatus("button4", SEND_BLINK_TIME);
+        ADDBUTTON(button_status, BUTTON4);
+    }
+    else {
+      CLRBUTTON(button_status, BUTTON4);
+    }
+    if (clicked(MENURIGHT) > 0) {
+        oledStatus("button5", SEND_BLINK_TIME);
         ADDBUTTON(button_status, BUTTON5);
     }
     else {
       CLRBUTTON(button_status, BUTTON5);
     }
-    if (clicked(MENURIGHT)) {
-        OledStatus("button6", SEND_BLINK_TIME);
+    if (clicked(MENULEFT) > 0) {
+        oledStatus("button6", SEND_BLINK_TIME);
         ADDBUTTON(button_status, BUTTON6);
     }
     else {
       CLRBUTTON(button_status, BUTTON6);
-    }
-    
-    if (clicked(POWER)) {
-        OledStatus("power", SEND_BLINK_TIME);
-    }
-    else {
-    }
-
-    if (clicked(UP)) {
-        OledStatus("button4", SEND_BLINK_TIME);
-        ADDBUTTON(button_status, BUTTON4);
-    }
-    else {
-      CLRBUTTON(button_status, BUTTON4);
     }
 
     if (button_status != last_button_status) {
@@ -238,44 +271,67 @@ void controller(BLEDevice peripheral) {
       mode = 1;
       peripheral.disconnect();
     }      
-/*
-    if (button_status != button_history[(HISTORY_LENGTH*2)-1]) {
-      count++;
-      if (count == 0) {
-        count = 1;
-      }
-      arrayPush(count, button_history, HISTORY_LENGTH*2);
-      arrayPush(button_status, button_history, HISTORY_LENGTH*2);
-      last_send = now;
-      //buttonChar.writeValue(button_history, HISTORY_LENGTH*2, true);
-    }
-    if (now - last_send > SEND_BLINK_TIME) {
-      //analogWrite(CONNECTED, 128);
-    }
-    */
-    
-    OledStatus();
+    oledStatus();
   } // peripheral.connected()
-  Serial.println("disconnected");
+  SPL("disconnected");
+  clearOledMenu();
   connected = false;
   device_name = "";
-  OledStatus("DISCONNECTED");
+  oledStatus("DISCONNECTED");
   return;
 } // controller()
 
+/*
+ * Store all the button clicks in an array that we can query later.  Handles the debouncing logic, and discards any stale
+ * clicks that aren't queried after a second.
+ */
+void clickLoop() {
+  now = millis();
+  for (int button = 0; button < BUTTONS; button++) {
+    if (digitalRead(button) == LOW) {
+      if (last_clicked[button] < last_released[button]) {
+        //SP("button ");
+        //SP(button);
+        //SPL(" clicked");
+        last_clicked[button] = now;
+      }
+    }
+    else { // button == HIGH
+      if (last_clicked[button] > last_released[button]) {
+        if (last_released[button] - last_clicked[button] > BOUNCE_TIMEOUT) {
+          //SP("button ");
+          //SP(button);
+          //SPL(" released");
+          last_released[button] = now;
+        }
+        else {
+          last_clicked[button] = 0;
+          last_released[button] = 1;
+        }
+      }
+      else if (last_clicked[button] > 0 && last_released[button] > last_clicked[button] && last_clicked[button] < now - 1000) {
+        // this click happened more than a second ago and we never did anything with it -- discard
+        last_clicked[button] = 0;
+        last_released[button] = 1;
+      }
+    }
+  }
+  yield();
+}
 
-bool clicked(int button) {
-  if (digitalRead(button) == LOW) {
-    if (last_clicked[button] == 0) {
-      last_clicked[button] = now;
-    }
-  }
-  else {
-    uint32_t last = last_clicked[button];
+// returns the amount of time a pin was last in the LOW position.
+int16_t clicked(uint8_t button) {
+  now = millis();
+  //SP("checking button ");
+  //SPL(button);
+  if (last_clicked[button] > 0 && last_released[button] > last_clicked[button]) {
+    int16_t held = last_released[button] - last_clicked[button] ;
+    // reset these values so we don't ever count the same click twice.
     last_clicked[button] = 0;
-    if (now > last + 35) {
-      return true;
-    }
+    last_released[button] = 1;
+    return held;
   }
-  return false;
+  //SP("done checking button ");
+  //SPL(button);
+  return 0;
 }
