@@ -1,3 +1,5 @@
+#define OLED_MENU_ITEMS 4
+
 static const unsigned char PROGMEM BT_bmp[] = {
  0b00000001,0b00000000,
  0b00000001,0b10000000,
@@ -18,11 +20,13 @@ static const unsigned char PROGMEM BT_bmp[] = {
 };
 
 String oled_menu[4];
-uint32_t last_status = millis();
+uint32_t last_status = 0;
 String last_status_str = "starting up";
 
 void clearOledMenu();
 void oledStatus();
 void oledStatus(String text);
 void oledStatus(String text, uint16_t status_ttl);
+void updateOledMenu(String menu);
+void updateOledMenu(uint8_t menu_item, String value);
 void updateOledMenu(BLEDevice central, BLECharacteristic menuChar);

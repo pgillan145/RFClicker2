@@ -14,7 +14,9 @@ void oledStatus(String text, uint16_t status_ttl) {
 
   if (text.length() > 0) {
     last_status = now + status_ttl;
-    last_status_str = text;
+    last_status_str = text.substring(0,12);
+    SPL(text);
+    //writeLog(text);
   }
   // display statusi for a second
   if (last_status_str.length() > 0 && now < last_status) {
@@ -54,7 +56,7 @@ void oledStatus(String text, uint16_t status_ttl) {
         display.setCursor(SCREEN_WIDTH*.5 - (int)(str.length()/2)*OLED_CHAR_SIZE, OLED_CHAR_SIZE*5);                    
         break;
       case 2: // LEFT
-        display.setCursor(SCREEN_WIDTH*.5 - (OLED_CHAR_SIZE) - (str.length()*OLED_CHAR_SIZE), OLED_CHAR_SIZE*4);   
+        display.setCursor(SCREEN_WIDTH*.5 - (str.length()*OLED_CHAR_SIZE), OLED_CHAR_SIZE*4);   
         break;
       case 3: // UP
         display.setCursor(SCREEN_WIDTH*.5 - (int)(str.length()/2)*OLED_CHAR_SIZE, OLED_CHAR_SIZE*3);   
@@ -73,29 +75,46 @@ void oledStatus(String text, uint16_t status_ttl) {
 }
 
 void clearOledMenu() {
-  oled_menu[0] = "";
-  oled_menu[1] = "";
-  oled_menu[2] = "";
-  oled_menu[3] = "";
+  arrayFill("", oled_menu, OLED_MENU_ITEMS);
 }
 
+void updateOledMenu(uint8_t menu_item, String value) {
+  if (menu_item < OLED_MENU_ITEMS) {
+    oled_menu[menu_item] =  value;
+  }
+}
+
+void updateOledMenu(String menu) {
+  if (menu.length() > 0) {
+    clearOledMenu();
+    int oled_menu_item = 0;
+    String item = "";
+    for (int i=0; i<menu.length();i++) {
+      char c = menu.charAt(i);
+      if (c == MENU_DELIM) {
+        updateOledMenu(oled_menu_item, item);
+        oled_menu_item++; 
+        if (oled_menu_item >= OLED_MENU_ITEMS) {
+          return;
+        }
+        item = "";
+        continue;
+      } // MENU_DELIM
+      item += c;
+    } 
+    updateOledMenu(oled_menu_item, item);
+  } // menu.length() > 0
+} // updateOledMenu()
+
 void updateOledMenu(BLEDevice central, BLECharacteristic menuChar) {
+  String menu = "";
   if (menuChar.canRead()) {
-    // read the characteristic value
     menuChar.read();
     if (menuChar.valueLength() > 0) {
-      // print out the value of the characteristic
-      int oled_menu_item = 0;
-      oled_menu[oled_menu_item] = "";
       for (int i=0; i<menuChar.valueLength();i++) {
-        char c = (menuChar.value())[i];
-        if (c == MENU_DELIM) {
-          oled_menu_item++; 
-          oled_menu[oled_menu_item] = "";
-          continue;
-        }
-        oled_menu[oled_menu_item] +=  c;
+        menu += (char)(menuChar.value())[i];
       }
-    }
-  }
+      updateOledMenu(menu);
+    } // menuChar.valueLength() > 0
+  } // menuChar.canRead()
 }
